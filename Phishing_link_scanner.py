@@ -1,57 +1,133 @@
+# phishing_link_scanner_interactive.py
 import tldextract
 import Levenshtein as lv
 from urllib.parse import urlparse
-from difflib import SequenceMatcher
+import ipaddress
+import re
 
-legitimate_domains = ['examples.com', 'google.com', 'facebook.com']
+# small whitelist you can expand or load from file
+legitimate_domains = ['examples.com', 'google.com', 'facebook.com', 'youtube.com']
 
-test_urls = [
-    'http://example.co',
-    'http://examp1e.com',
-    'https://www.google.security-update.com',
-    'http://faceb00k.com/login',
-    'https://google.com'
+SUSPICIOUS_KEYWORDS = [
+    'secure', 'account', 'update', 'login', 'verify', 'confirm', 'bank', 'reset'
 ]
 
-def get_registered_domain(hostname):
-    parts = hostname.split('.')
-    if len(parts) >= 2:
-        return parts[-2] + '.' + parts[-1]
-    return hostname
+def extract_domain_parts(url):
+    e = tldextract.extract(url)
+    # e.subdomain, e.domain, e.suffix
+    return e.subdomain, e.domain, e.suffix
 
-def is_misspelled_domain(registered_domain, legitimate_domains, threshold=0.9):
+def is_misspelled_domain(domain, legitimate_domains, threshold=0.9):
     for legit in legitimate_domains:
-        sim = SequenceMatcher(None, registered_domain, legit).ratio()
+        # compare only the registered name (without suffix)
+        sim = lv.ratio(domain, legit.split('.')[0])
         if sim >= threshold:
             return True
     return False
 
-def is_phishing_url(url, legitimate_domains, threshold=0.9):
+def heuristic_score(url):
+    """
+    Return a numeric score where higher means more suspicious.
+    You can tune the weights below to change sensitivity.
+    """
+    score = 0.0
     parsed = urlparse(url)
     hostname = (parsed.hostname or '').lower()
     if not hostname:
+        return score
+
+    # 1) credential injection (user:pass@host)
+    if parsed.username or parsed.password or '@' in url:
+        score += 2.0
+
+    # 2) IP address used as hostname
+    try:
+        ipaddress.ip_address(hostname)
+        score += 2.5
+    except Exception:
+        pass
+
+    # 3) many subdomains (depth)
+    labels = hostname.split('.')
+    if len(labels) >= 4:  # e.g., a.b.c.domain.com
+        score += 1.0
+    if len(labels) >= 6:
+        score += 1.0
+
+    # 4) hyphens and digits in domain (common in typosquats)
+    # check registered domain (second-level + suffix)
+    sub, domain, suffix = extract_domain_parts(url)
+    registered = f"{domain}.{suffix}" if suffix else domain
+
+    hyphen_count = domain.count('-')
+    if hyphen_count >= 1:
+        score += 0.8 * hyphen_count
+    if any(ch.isdigit() for ch in domain):
+        score += 0.8
+
+    # 5) suspicious keywords anywhere in host/path
+    host_and_path = hostname + parsed.path
+    for kw in SUSPICIOUS_KEYWORDS:
+        if kw in host_and_path:
+            score += 1.5
+
+    # 6) very long domain or URL length
+    if len(domain) > 20:
+        score += 0.8
+    if len(url) > 200:
+        score += 0.8
+
+    # 7) many query parameters (not always malicious but often used)
+    if parsed.query and parsed.query.count('&') >= 4:
+        score += 0.5
+
+    return score
+
+def is_phishing_url(url, legitimate_domains, typo_threshold=0.9, heuristic_threshold=2.0):
+    subdomain, domain, suffix = extract_domain_parts(url)
+    hostname = f"{domain}.{suffix}".lower() if suffix else domain.lower()
+
+    # 1) legitimate domain check
+    if hostname in legitimate_domains:
+        print(f"[SAFE]   {url} -> registered domain '{hostname}' is known-good")
         return False
-    registered = get_registered_domain(hostname)
-    
-    # Exact match -> safe
-    if registered in legitimate_domains:
-        print(f"[SAFE]   {url}  -> registered domain '{registered}' is known-good")
-        return False
-    
-    # Brand-as-subdomain trick (e.g., google.security-update.com)
+
+    # 2) brand in subdomain trick (e.g., google.security-update.com)
     for legit in legitimate_domains:
-        if legit.split('.')[0] in hostname and registered != legit:
-            print(f"[PHISH]  {url}  -> contains legitimate brand '{legit}' in hostname '{hostname}' but registered domain is '{registered}'")
+        legit_name = legit.split('.')[0]
+        if legit_name in subdomain and hostname != legit:
+            print(f"[PHISH]  {url} -> contains brand '{legit_name}' in subdomain but registered domain is '{hostname}'")
             return True
-    
-    # Misspelling / typosquat on registered domain
-    if is_misspelled_domain(registered, legitimate_domains, threshold):
-        print(f"[PHISH]  {url}  -> registered domain '{registered}' is similar to a legit domain")
+
+    # 3) misspelling check (typosquatting)
+    if is_misspelled_domain(domain, legitimate_domains, threshold=typo_threshold):
+        print(f"[PHISH]  {url} -> domain '{domain}' looks similar to a legit domain")
         return True
-    
-    print(f"[UNKNOWN]{url} -> registered domain '{registered}' not in list and not similar enough (ratio<{threshold})")
+
+    # 4) heuristic fallback (works for any arbitrary URL)
+    score = heuristic_score(url)
+    if score >= heuristic_threshold:
+        print(f"[PHISH]  {url} -> heuristic score {score:.2f} >= {heuristic_threshold}")
+        return True
+
+    # otherwise unknown / probably safe
+    print(f"[UNKNOWN]{url} -> heuristic score {score:.2f} (below threshold {heuristic_threshold})")
     return False
 
-# Run checks
-for url in test_urls:
-    is_phishing_url(url, legitimate_domains, threshold=0.85)  # tweak threshold as needed
+if __name__ == "__main__":
+    print("🔍 Phishing Link Scanner (interactive). Enter one URL per line; type 'done' to finish.")
+    urls = []
+    while True:
+        u = input("URL: ").strip()
+        if not u:
+            continue
+        if u.lower() == 'done':
+            break
+        urls.append(u)
+
+    if not urls:
+        print("No URLs entered. Exiting.")
+    else:
+        print("\n--- SCANNING RESULTS ---\n")
+        for u in urls:
+            is_phishing_url(u, legitimate_domains, typo_threshold=0.85, heuristic_threshold=2.0)
