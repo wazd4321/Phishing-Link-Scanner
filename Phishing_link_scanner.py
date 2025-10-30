@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 import ipaddress
 import re
 
-# small whitelist you can expand or load from file
+# small whitelist that can be loaded
 legitimate_domains = ['examples.com', 'google.com', 'facebook.com', 'youtube.com']
 
 SUSPICIOUS_KEYWORDS = [
@@ -14,12 +14,10 @@ SUSPICIOUS_KEYWORDS = [
 
 def extract_domain_parts(url):
     e = tldextract.extract(url)
-    # e.subdomain, e.domain, e.suffix
     return e.subdomain, e.domain, e.suffix
 
 def is_misspelled_domain(domain, legitimate_domains, threshold=0.9):
     for legit in legitimate_domains:
-        # compare only the registered name (without suffix)
         sim = lv.ratio(domain, legit.split('.')[0])
         if sim >= threshold:
             return True
@@ -49,13 +47,12 @@ def heuristic_score(url):
 
     # 3) many subdomains (depth)
     labels = hostname.split('.')
-    if len(labels) >= 4:  # e.g., a.b.c.domain.com
+    if len(labels) >= 4:
         score += 1.0
     if len(labels) >= 6:
         score += 1.0
 
     # 4) hyphens and digits in domain (common in typosquats)
-    # check registered domain (second-level + suffix)
     sub, domain, suffix = extract_domain_parts(url)
     registered = f"{domain}.{suffix}" if suffix else domain
 
@@ -131,3 +128,4 @@ if __name__ == "__main__":
         print("\n--- SCANNING RESULTS ---\n")
         for u in urls:
             is_phishing_url(u, legitimate_domains, typo_threshold=0.85, heuristic_threshold=2.0)
+
