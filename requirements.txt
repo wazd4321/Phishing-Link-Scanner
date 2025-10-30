@@ -1,0 +1,2 @@
+tldextract==5.1.2
+python-Levenshtein==0.25.1
